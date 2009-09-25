@@ -1,0 +1,8 @@
+This is a Database Snapshot utility that allows you to keep up with simple databases and changes in a git repository.
+
+Simple Usage:
+
+- setup bin/config.php
+- run bin/snap.php
+
+
