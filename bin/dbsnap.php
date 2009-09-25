@@ -161,7 +161,7 @@ class dbsnap {
 			foreach($res['data'] as $i => $row) {
 				$table_md5 .= $row['field'] . $row['type'] . $row['null'] . 
 								$row['key'] . $row['default'] . $row['extra'];
-				if ($row['key'] == 'PRI') {
+				if ($row['key'] == 'PRI' && strpos($row['type'],'int')!==false ) {
 					$pk = $row['field'];
 					$pk_cnt++;
 				}
@@ -303,7 +303,6 @@ class dbsnap {
 			$this->snapTableSql($server, $db, $table);
 			$this->setTableMd5($table_md5, $server, $db, $table);
 		}
-		
 		
 		if($clean_connection) {
 			unset($this->db);
@@ -529,15 +528,104 @@ class dbsnap {
 		
 		$sql = 'describe ' . $table;
 		$res = $this->db->querySelect($sql);
+		
 		if($res['rows']) {
+			$pk_cnt = 0;
 			foreach($res['data'] as $i => $row) {
 				$table_md5 .= $row['field'] . $row['type'] . $row['null'] . 
 					$row['key'] . $row['default'] . $row['extra'];
+				if ($row['key'] == 'PRI' && strpos($row['type'],'int')!==false ) {
+					$pk = $row['field'];
+					$pk_cnt++;
+				}
+				
+				if ($row['null'] == 'YES') {
+					$fields[] = "if(isnull({$row['field']}), '', {$row['field']})";
+				} else {
+					$fields[] = $row['field'];
+				}
 			}
 		}
 		$table_md5 = md5($table_md5);
+		$field_sql = implode(',', $fields);
+
+		// Check the table structure
 		$current_table_md5 = $this->getTableMd5($server, $db, $table);
-		return ($table_md5 != $current_table_md5);
+		if ($table_md5 != $current_table_md5) return true;
+
+		if (!empty($pk) && $pk_cnt == 1) {
+		
+			$sql = "SELECT max({$pk}) maxid, min({$pk}) minid, count(*) as cnt FROM {$table}";
+			$res = $this->db->querySelect($sql);
+			if($res['rows']) {
+				$pkmin = $res['data'][0]['minid'];
+				$pkmax = $res['data'][0]['maxid'];
+				$cnt = $res['data'][0]['cnt'];
+			}
+			$start = (floor($pkmin/1000)) ? (floor($pkmin/1000) * 1000) : 0 ;
+			$end = (ceil($pkmax/1000)) ? (ceil($pkmax/1000) * 1000) : 500 ;
+
+			// Get the unique MD5 for this set of 500
+			$current = $start;
+			
+			for($i=$start;$i<=$end;$i+=500) {
+				$first_id = $i;
+				$last_id = $i + 500;
+
+				$sql = "select
+					md5(concat(GROUP_CONCAT(i.j))) as unique_md5
+					FROM (SELECT
+					floor(({$last_id} - o.{$pk}) / 25) as grp, count(*) as cnt,
+					md5(concat(GROUP_CONCAT(MD5(CONCAT(
+					{$field_sql}
+					))))) as j
+					FROM {$table} o
+					where o.{$pk} > {$first_id} and o.{$pk} <= {$last_id}
+					group by grp
+					order by {$pk} asc) as i";
+
+				$res = $this->db->querySelect($sql);
+				if (!empty($res['data'][0]['unique_md5'])) {
+					$md5 = $res['data'][0]['unique_md5'];
+					$oldmd5 = $this->getDataMd5($server, $db, $table, $last_id);
+					if ($md5 != $oldmd5) return true;
+				}
+			}
+		} else {
+			// Backup the table that has multiple PK's or no PK
+			$sql = "SELECT count(*) as cnt FROM {$table}";
+			$res = $this->db->querySelect($sql);
+			if($res['rows']) {
+				$cnt = $res['data'][0]['cnt'];
+			}
+			$start = 0 ;
+			$end = ($cnt) ? $cnt : 500 ;
+			
+			for($i=$start;$i<=$end;$i+=500) {
+				$first_id = $i;
+				$last_id = $i + 500;
+				$sql = "select MD5(CONCAT(
+					{$field_sql}
+					)) as m5
+					FROM {$table} o
+					order by {$field_sql} asc
+					limit {$first_id}, 500
+					";
+				$res = $this->db->querySelect($sql);
+				$md5sum = '';
+				if($res['rows']) {
+					foreach($res['data'] as $m => $row) {
+						$md5sum .= $row['m5'];
+					}
+				}
+				$md5 = md5($md5sum);
+				unset($md5sum);
+				$oldmd5 = $this->getDataMd5($server, $db, $table, $last_id);
+				if ($md5 != $oldmd5) return true;
+			}
+		}
+
+		return false;
 	}
 	
 	
